@@ -38,16 +38,6 @@ typedef struct InverseFlowPair{
 
 MPI_Datatype MpiInverseFlowPair;
 
-// template<class T>
-// void print_array(T *array, int length, int processId){
-//     cout << "[proc" << processId << "]:";
-//     cout << "{";
-//     for(int i=0;i<length;i++){
-//         cout << array[i] << ", ";
-//     }
-//     cout << "}" << endl;
-// }
-
 void register_inverse_flow_pair_to_mpi(MPI_Datatype *MpiInverseFlowPair){
     InverseFlowPair templ;
     int blockLength[3] = {1,1,1};
@@ -191,25 +181,21 @@ int sync_flow(int* flow, int N, int processRank, int nProcess, MPI_Comm comm, ve
     // 发送outInverseFlow并更新各自flow
     vector<InverseFlowPair> recvInverseFlowPair;
     // phase 1: 发给大的，收小的
-    // send phase
     for(int outProcIdx = outInverseFlow.size()-1; outProcIdx > processRank; outProcIdx--){
         send_inverse_flow(outProcIdx, outInverseFlow, comm);
     }
-    // recv phase
+
     unordered_set<int> waitProcesses;
     for(int i=0;i<processRank;i++){
         waitProcesses.insert(i);
     }
     recv_inverse_flow(waitProcesses, recvInverseFlowPair, comm);
-    // barrier
-    // MPI_Barrier(comm);
 
     // phase 2: 发给小的，收大的
-    // send phase
     for(int outProcIdx = 0; outProcIdx < processRank; outProcIdx++){
         send_inverse_flow(outProcIdx, outInverseFlow, comm);
     }
-    // recv phase
+
     waitProcesses.clear();
     for(int i=nProcess-1;i>processRank;i--){
         waitProcesses.insert(i);
@@ -231,44 +217,35 @@ int sync_flow(int* flow, int N, int processRank, int nProcess, MPI_Comm comm, ve
 int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, int *cap, int *flow) {
     register_inverse_flow_pair_to_mpi(&MpiInverseFlowPair);
     int nProcess=p, processRank=my_rank;
-    /*
-    ready:
-    PStage 1:
-    cap should be broadcast to each process
-    */
+    // broadcast basic vars
     MPI_Bcast(&N, 1, MPI_INT, 0, comm);
     MPI_Bcast(&src, 1, MPI_INT, 0, comm);
     MPI_Bcast(&sink, 1, MPI_INT, 0, comm);
     if (processRank != 0) {
-        cap = (int *)calloc(N * N, sizeof(int)); // todo: remember to free!
-        flow = (int *)calloc(N * N, sizeof(int)); // todo: remember to free!
+        cap = (int *)calloc(N * N, sizeof(int));
+        flow = (int *)calloc(N * N, sizeof(int));
     }
     MPI_Bcast(cap, N * N, MPI_INT, 0, comm);
+
+    // pre-compute displacement&cnt of vertex for each process
     vector<int> CastvCnt, CastvDisp;
     get_castv_cnt_disp_array(N, nProcess, CastvCnt, CastvDisp);
 
-    /*
-    parallel in a master-worker paradism
-    process 0 acts as the master, and all processes act as workers
-    */
+    // alloc mem for immediate vars
     int *dist = (int *)calloc(N, sizeof(int));
     int *stash_dist = (int *)calloc(N, sizeof(int));
     int64_t *excess = (int64_t *)calloc(N, sizeof(int64_t));
     int64_t *stash_excess = (int64_t *)calloc(N, sizeof(int64_t));
+    int *stash_send = (int *)calloc(N * N, sizeof(int));
 
-    /*
-    PreFlow:
-    PStage 2:
-    no need to parallel, high communication compared to computation
-    */
+    // do first flow
     pre_flow(dist, excess, cap, flow, N, src);
+
+    // compute workload (number of vertex managed by this process)
+    int nWorkload = get_workload(processRank, N, nProcess);
 
     vector<int> globalActiveNodes;
     vector<int> localActiveNodes;
-    int nWorkload = get_workload(processRank, N, nProcess);
-
-    int *stash_send = (int *)calloc(N * N, sizeof(int));
-
     vector<int> vid2process, vid2offset;
     get_process_vid_offset(N, nProcess, vid2process, vid2offset);
     /*
@@ -287,21 +264,17 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
     print_array(cap, N*N);
     // make data ready use about 0.01s on dataset2, so it should not be the reason of slow
     // Four-Stage Pulses.
-    int nloop = 0;
     while (nGlobalActiveNodes > 0) {
-        nloop++;
-        // Stage 1: push.
-        // split tasks, use block partition strategy (3 3 2 2 2)
+        // clear immediate vars
         memset(stash_excess, 0, sizeof(int64_t)*N);
 
         /*
-        PStage 4:
+        Stage 1:
         each process of u should be parallelized.
         flow need to be broadcast, each process maintain their stash_send
         each process modify their own stash_send and excess
         */
 
-        /* same as serial Stage 1*/
         print_array(dist, N);
         for (int u : localActiveNodes)
         {
@@ -320,26 +293,28 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
         print_array(excess, N);
 
         /*
-        PStage 5:
+        Stage 2:
         each process of u should be parallelized
         each worker works on its rows in flow, and contributes to stash_excess at each v
         after all master reduce all stash_excess
         */
 
-        // for (int u : localActiveNodes)
-        // {
-        //     for (int v = 0; v < N; v++)
-        //     {
-        //         if (stash_send[utils::idx(u, v, N)] > 0)
-        //         {
-        //             // 这里如果按u划分，那么stash_send不必传送，如果按v划分，则stash_excess不必传送。考虑stash_send规模更大， 采用按u划分。
-        //             flow[utils::idx(u, v, N)] += stash_send[utils::idx(u, v, N)];
-        //             flow[utils::idx(v, u, N)] -= stash_send[utils::idx(u, v, N)];
-        //             stash_excess[v] += stash_send[utils::idx(u, v, N)];
-        //             stash_send[utils::idx(u, v, N)] = 0;
-        //         }
-        //     }
-        // }
+        /* serial
+        for (int u : localActiveNodes)
+        {
+            for (int v = 0; v < N; v++)
+            {
+                if (stash_send[utils::idx(u, v, N)] > 0)
+                {
+                    // 这里如果按u划分，那么stash_send不必传送，如果按v划分，则stash_excess不必传送。考虑stash_send规模更大， 采用按u划分。
+                    flow[utils::idx(u, v, N)] += stash_send[utils::idx(u, v, N)];
+                    flow[utils::idx(v, u, N)] -= stash_send[utils::idx(u, v, N)];
+                    stash_excess[v] += stash_send[utils::idx(u, v, N)];
+                    stash_send[utils::idx(u, v, N)] = 0;
+                }
+            }
+        }
+        */
 
         vector<vector<InverseFlowPair>> outInverseFlow;
         outInverseFlow.resize(nProcess, vector<InverseFlowPair>());
@@ -362,12 +337,11 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
                 }
             }
         }
-        pause;
-        // MPI_Barrier(comm);
+
+        // sync flow data across processes
         sync_flow(flow, N, processRank, nProcess, comm, outInverseFlow);
 
-        // MPI_Barrier(comm);
-        // 收集stash_excess并发送给所有人
+        // sum up all stash_excess
         int64_t *new_stash_excess = (int64_t *)calloc(N, sizeof(int64_t));
         MPI_Allreduce(stash_excess, new_stash_excess, N, MPI_INT64_T, MPI_SUM, comm);
         memcpy(stash_excess, new_stash_excess, sizeof(int64_t)*N);
@@ -376,7 +350,7 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
         // Stage 2: relabel (update dist to stash_dist).
         memcpy(stash_dist, dist, N * sizeof(int));
         /*
-        PStage 6:
+        Stage 3:
         each process of u are parallelized
         master send corresponding excess and flow to workers
         master send all dist to workers, workers generate stash_dist
@@ -401,13 +375,12 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
 
         // Stage 3: update dist.
         MPI_Allgatherv(&stash_dist[CastvDisp[processRank]], CastvCnt[processRank], MPI_INT, dist, CastvCnt.data(), CastvDisp.data(), MPI_INT, comm);
-        // swap(dist, stash_dist);
 
-        // barrier
         /*
         PStage 7:
         此时stash_excess是全部正确的，但excess仅自己管理的部分是正确的
         因此只更新自己管理的部分
+
         */
         // Stage 4: apply excess-flow changes for destination vertices.
         /*
@@ -455,19 +428,16 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
             printf("=========================================\n");
         }
 #endif
-        // MPI_Barrier(MPI_COMM_WORLD);
     }
-    printf("total loop: %d", nloop);
-    clock_t t1 = clock();
     // 更新process 0 上的flow
     vector<int> flowCastvDisp(CastvDisp), flowCastvCnt(CastvCnt);
-    for(int i=0;i<nProcess;i++){
+    for(int i=0;i<nProcess;i++) {
         flowCastvDisp[i] *= N;
         flowCastvCnt[i] *= N;
     }
     MPI_Gatherv(&flow[flowCastvDisp[processRank]], flowCastvCnt[processRank], MPI_INT, 
     flow, flowCastvCnt.data(), flowCastvDisp.data(), MPI_INT, 0, comm);
-    clock_t t2 = clock();
+
     free(dist);
     free(stash_dist);
     free(excess);
