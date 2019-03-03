@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <ctime>
+#include <chrono>
 #include "unistd.h"
 #include "mpi_push_relabel.h"
 
@@ -30,6 +31,7 @@
 #define pause sleep(0);
 
 using namespace std;
+using namespace std::chrono;
 
 typedef struct InverseFlowPair{
     int src;
@@ -130,22 +132,47 @@ exchange inverse flow helper function
 #define N_INVERSE_FLOW_TAG 1
 #define INVERSE_FLOW_DATA_TAG 2
 
+long long int send_time[4] = {0};
+
+void print_send_time(int processRank) {
+    for(int i=0;i<1;i++){
+        printf("[%d]send %d time: %lld us\n", processRank, i, send_time[i]);
+    }
+}
+
 int send_inverse_flow(int outProcIdx, vector<vector<InverseFlowPair>> &outInverseFlow, MPI_Comm comm){
+    auto start_clock = high_resolution_clock::now();
     int nOutInverseFlow;
     nOutInverseFlow = outInverseFlow[outProcIdx].size();
     MPI_Send(&nOutInverseFlow, 1, MPI_INT, outProcIdx, N_INVERSE_FLOW_TAG, comm);
     if(nOutInverseFlow > 0){
         MPI_Send(outInverseFlow[outProcIdx].data(), nOutInverseFlow, MpiInverseFlowPair, outProcIdx, INVERSE_FLOW_DATA_TAG, comm);
     }
+    send_time[0] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
     return 0;
 }
 
-int recv_inverse_flow(unordered_set<int> &waitProcesses, vector<InverseFlowPair> &recvInverseFlowPair, MPI_Comm comm){
+long long int recv_time[4] = {0};
+
+void print_recv_time(int processRank) {
+    for(int i=0;i<2;i++){
+        printf("[%d]recv %d time: %lld us\n", processRank, i, recv_time[i]);
+    }
+}
+
+vector<InverseFlowPair> recvBuff;
+int recv_inverse_flow(unordered_set<int> &waitProcesses, vector<InverseFlowPair> &recvInverseFlowPair, MPI_Comm comm, int processRank){
+    // printf("][");
     int nWaitRecv = waitProcesses.size();
     unordered_map<int, int> nInInverseFlows;
     while(nWaitRecv > 0){
+        // auto start_clock = high_resolution_clock::now();
         MPI_Status probeStatus;
         MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, comm, &probeStatus);
+        // long long int probeTime = duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
+        // printf("%d:%lld ", processRank, probeTime);
+        // recv_time[0] += probeTime;
+        // start_clock = high_resolution_clock::now();
         if(probeStatus.MPI_TAG == N_INVERSE_FLOW_TAG){
             MPI_Status recvStatus;
             int source = probeStatus.MPI_SOURCE;
@@ -164,15 +191,14 @@ int recv_inverse_flow(unordered_set<int> &waitProcesses, vector<InverseFlowPair>
             } else {
                 MPI_Status recvStatus;
                 int recvSize = nInInverseFlows[source];
-                vector<InverseFlowPair> recvBuff;
-                recvBuff.resize(recvSize, InverseFlowPair{0,0,0});
                 MPI_Recv(recvBuff.data(), recvSize, MpiInverseFlowPair, source, tag, comm, &recvStatus);
-                for(auto p = recvBuff.begin(); p!= recvBuff.end(); p++){
-                    recvInverseFlowPair.push_back(*p);
+                for(int i=0; i<recvSize; i++){
+                    recvInverseFlowPair.push_back(recvBuff[i]);
                 }
                 nWaitRecv--;
             }
         }
+        // recv_time[1] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
     }
     return 0;
 }
@@ -189,7 +215,7 @@ int sync_flow(int* flow, int N, int processRank, int nProcess, MPI_Comm comm, ve
     for(int i=0;i<processRank;i++){
         waitProcesses.insert(i);
     }
-    recv_inverse_flow(waitProcesses, recvInverseFlowPair, comm);
+    recv_inverse_flow(waitProcesses, recvInverseFlowPair, comm, processRank);
     MPI_Barrier(comm);
 
     // phase 2: 发给小的，收大的
@@ -201,7 +227,7 @@ int sync_flow(int* flow, int N, int processRank, int nProcess, MPI_Comm comm, ve
     for(int i=nProcess-1;i>processRank;i--){
         waitProcesses.insert(i);
     }
-    recv_inverse_flow(waitProcesses, recvInverseFlowPair, comm);
+    recv_inverse_flow(waitProcesses, recvInverseFlowPair, comm, processRank);
 
     // phase 3: 自己
     for(auto ptr = outInverseFlow[processRank].begin(); ptr != outInverseFlow[processRank].end(); ptr++){
@@ -238,6 +264,9 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
     int64_t *excess = (int64_t *)calloc(N, sizeof(int64_t));
     int64_t *stash_excess = (int64_t *)calloc(N, sizeof(int64_t));
     int *stash_send = (int *)calloc(N * N, sizeof(int));
+    int64_t *new_stash_excess = (int64_t *)calloc(N, sizeof(int64_t));
+    recvBuff.resize(N*N);
+
 
     // do first flow
     pre_flow(dist, excess, cap, flow, N, src);
@@ -263,11 +292,15 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
     }
     int nGlobalActiveNodes = globalActiveNodes.size();
     print_array(cap, N*N);
+
+    long long int timer[5] = {0};
     // make data ready use about 0.01s on dataset2, so it should not be the reason of slow
     // Four-Stage Pulses.
     while (nGlobalActiveNodes > 0) {
         // clear immediate vars
+        // auto start_clock = high_resolution_clock::now();
         memset(stash_excess, 0, sizeof(int64_t)*N);
+        memset(new_stash_excess, 0, sizeof(int64_t)*N);
 
         /*
         Stage 1:
@@ -339,15 +372,19 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
             }
         }
 
+        // timer[0] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
+        // start_clock = high_resolution_clock::now();
         // sync flow data across processes
         sync_flow(flow, N, processRank, nProcess, comm, outInverseFlow);
         print_array(flow, N*N);
+        // timer[1] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
 
         // sum up all stash_excess
-        int64_t *new_stash_excess = (int64_t *)calloc(N, sizeof(int64_t));
-        MPI_Allreduce(stash_excess, new_stash_excess, N, MPI_INT64_T, MPI_SUM, comm);
-        memcpy(stash_excess, new_stash_excess, sizeof(int64_t)*N);
-        free(new_stash_excess);
+        MPI_Request excessRequest;
+        // MPI_Allreduce(stash_excess, new_stash_excess, N, MPI_INT64_T, MPI_SUM, comm);
+        MPI_Iallreduce(stash_excess, new_stash_excess, N, MPI_INT64_T, MPI_SUM, comm, &excessRequest);
+
+        // start_clock = high_resolution_clock::now();
 
         // Stage 2: relabel (update dist to stash_dist).
         memcpy(stash_dist, dist, N * sizeof(int));
@@ -374,10 +411,15 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
                 }
             }
         }
+        // timer[2] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
+        // start_clock = high_resolution_clock::now();
 
-        // Stage 3: update dist.
-        MPI_Allgatherv(&stash_dist[CastvDisp[processRank]], CastvCnt[processRank], MPI_INT, dist, CastvCnt.data(), CastvDisp.data(), MPI_INT, comm);
+        // timer[3] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
 
+        // update dist async.
+        MPI_Request distRequest;
+        MPI_Iallgatherv(&stash_dist[CastvDisp[processRank]], CastvCnt[processRank], MPI_INT, dist, CastvCnt.data(), CastvDisp.data(), MPI_INT, comm, &distRequest);
+        // MPI_Allgatherv(&stash_dist[CastvDisp[processRank]], CastvCnt[processRank], MPI_INT, dist, CastvCnt.data(), CastvDisp.data(), MPI_INT, comm);
         /*
         PStage 7:
         此时stash_excess是全部正确的，但excess仅自己管理的部分是正确的
@@ -396,6 +438,14 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
             }
         }
         */
+        // start_clock = high_resolution_clock::now();
+
+        // check finish of stash_excess
+        MPI_Wait(&excessRequest, MPI_STATUS_IGNORE);
+        memcpy(stash_excess, new_stash_excess, sizeof(int64_t)*N);
+        // timer[4] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
+
+
         for(int i=0;i<CastvCnt[processRank];i++){
             int v = i + CastvDisp[processRank];
             if(stash_excess[v] != 0){
@@ -403,6 +453,8 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
                 stash_excess[v] = 0;
             }
         }
+
+
 
         // Construct active nodes.
         // by master, no need to parallel
@@ -422,14 +474,23 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
                 localActiveNodes.emplace_back(v);
             }
         }
+
         int nLocalActiveNodes = localActiveNodes.size();
         MPI_Allreduce(&nLocalActiveNodes, &nGlobalActiveNodes, 1, MPI_INT, MPI_SUM, comm);
+
+        // wait update of dist
+        MPI_Wait(&distRequest, MPI_STATUS_IGNORE);
+
+
 #ifdef DEBUG    
         if(processRank == 0){
             printf("nGlobalActiveNodes=%d\n", nGlobalActiveNodes);
             printf("=========================================\n");
         }
 #endif
+    }
+    for(int i=0;i<5;i++){
+        printf("[p%d]stage %d consume %lld us.\n", processRank, i, timer[i]);
     }
     // 更新process 0 上的flow
     vector<int> flowCastvDisp(CastvDisp), flowCastvCnt(CastvCnt);
@@ -440,11 +501,15 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
     MPI_Gatherv(&flow[flowCastvDisp[processRank]], flowCastvCnt[processRank], MPI_INT, 
     flow, flowCastvCnt.data(), flowCastvDisp.data(), MPI_INT, 0, comm);
 
+    print_recv_time(processRank);
+    print_send_time(processRank);
     free(dist);
     free(stash_dist);
     free(excess);
     free(stash_excess);
     free(stash_send);
+    free(new_stash_excess);
+
     if(processRank != 0){
         free(flow);
         free(cap);
