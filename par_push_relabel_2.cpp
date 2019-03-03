@@ -16,7 +16,7 @@
 #include "unistd.h"
 #include "mpi_push_relabel.h"
 
-// #define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define print_array(x, l) cout << "[proc" << processRank << "]:"; \
     cout << #x << ":{"; \
@@ -155,7 +155,7 @@ int send_inverse_flow(int outProcIdx, vector<vector<InverseFlowPair>> &outInvers
 long long int recv_time[4] = {0};
 
 void print_recv_time(int processRank) {
-    for(int i=0;i<2;i++){
+    for(int i=0;i<3;i++){
         printf("[%d]recv %d time: %lld us\n", processRank, i, recv_time[i]);
     }
 }
@@ -238,6 +238,59 @@ int sync_flow(int* flow, int N, int processRank, int nProcess, MPI_Comm comm, ve
         int src = ptr->src, dst = ptr->dst, val = ptr->val;
         flow[utils::idx(src, dst, N)] -= val;
     }
+
+    // phase 1: send/recv number
+    // vector<int> outSize;
+    // for(int i=0;i<outInverseFlow.size();i++){
+    //     outSize.emplace_back(outInverseFlow[i].size());
+    // }
+
+    // vector<int> inSize;
+    // inSize.resize(nProcess*nProcess);
+    // auto start_clock = high_resolution_clock::now();
+    // MPI_Allgather(outSize.data(), nProcess, MPI_INT, inSize.data(), nProcess, MPI_INT, comm);
+
+    // recv_time[0] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
+    // start_clock = high_resolution_clock::now();
+    // // phase 2: send/recv data
+    // vector<MPI_Request> dataRequests;
+    // dataRequests.resize(2*(nProcess-1));
+    // int reqIdx = 0;
+    // vector<vector<InverseFlowPair>> recvPairs;
+    // recvPairs.resize(nProcess);
+    // for(int i=0;i<nProcess;i++){
+    //     if(i != processRank){
+    //         if(outSize[i] > 0){
+    //             MPI_Isend(outInverseFlow[i].data(), outSize[i], MpiInverseFlowPair, i, INVERSE_FLOW_DATA_TAG, comm, &dataRequests[reqIdx]);
+    //             reqIdx++;
+    //         }
+    //         if(inSize[i*nProcess + processRank] > 0){
+    //             recvPairs[i].resize(inSize[i*nProcess + processRank]);
+    //             MPI_Irecv(recvPairs[i].data(), inSize[i*nProcess + processRank], MpiInverseFlowPair, i, INVERSE_FLOW_DATA_TAG, comm, &dataRequests[reqIdx]);
+    //             reqIdx++;
+    //         }
+    //     }
+    // }
+    // MPI_Waitall(reqIdx, dataRequests.data(), MPI_STATUSES_IGNORE);
+    // recv_time[1] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
+    
+    // start_clock = high_resolution_clock::now();
+    // // phase 3: update flow
+    // for(auto ptr = outInverseFlow[processRank].begin(); ptr != outInverseFlow[processRank].end(); ptr++){
+    //     int src = ptr->src, dst = ptr->dst, val = ptr->val;
+    //     flow[utils::idx(src, dst, N)] -= val;
+    // }
+    // for(int i=0;i<nProcess;i++){
+    //     if(i != processRank && inSize[i] > 0){
+    //         for(auto ptr = recvPairs[i].begin(); ptr != recvPairs[i].end(); ptr++){
+    //             int src = ptr->src, dst = ptr->dst, val = ptr->val;
+    //             flow[utils::idx(src, dst, N)] -= val;
+    //         }
+    //     }
+    // }
+    // recv_time[2] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
+
+
     return 0;
 }
 
@@ -371,13 +424,16 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
                 }
             }
         }
-
         timer[0] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
+
         start_clock = high_resolution_clock::now();
+
+        MPI_Barrier(comm);
+        timer[1] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
+
         // sync flow data across processes
         sync_flow(flow, N, processRank, nProcess, comm, outInverseFlow);
         print_array(flow, N*N);
-        timer[1] += duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count();
 
 
         // sum up all stash_excess
@@ -499,8 +555,11 @@ int push_relabel(int my_rank, int p, MPI_Comm comm, int N, int src, int sink, in
         flowCastvDisp[i] *= N;
         flowCastvCnt[i] *= N;
     }
+
+    auto start_clock = high_resolution_clock::now();
     MPI_Gatherv(&flow[flowCastvDisp[processRank]], flowCastvCnt[processRank], MPI_INT, 
     flow, flowCastvCnt.data(), flowCastvDisp.data(), MPI_INT, 0, comm);
+    printf("gather flow consume %lld us\n", duration_cast<microseconds>(high_resolution_clock::now() - start_clock).count());
 
     print_recv_time(processRank);
     print_send_time(processRank);
