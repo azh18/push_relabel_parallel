@@ -14,7 +14,6 @@
 #include "cuda_push_relabel.h"
 
 #define MAX_N 520
-#define INT32_MAX 2147483647
 
 using namespace std;
 
@@ -37,11 +36,11 @@ __device__ inline int min_dev(int64_t a64, int b32){
 }
 
 __device__ inline atomicAdd(int64_t *addr, int64_t val){
-    int64_t assumed;
-    int64_t old = *addr;
+    unsigned long long int assumed;
+    unsigned long long int old = (unsigned long long int)(*addr);
     do{
         assumed = old;
-        old = atomicCAS(addr, assumed, *addr + val);
+        old = atomicCAS(addr, assumed, (int64_t)((unsigned long long int)(*addr) + (unsigned long long int)val));
     } while(assumed != old);
 }
 
@@ -83,7 +82,7 @@ __global__ void stage_1_kernel_v1(int *cap, int *flow, int *inverseFlow, int *di
     __shared__ bool open_v[MAX_N];
     __shared__ int stash_send[MAX_N];
 
-    for(int v = vidx_start, int vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
+    for(int v = vidx_start, vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
         local_dist[v] = dist[v];
     }
 
@@ -92,7 +91,7 @@ __global__ void stage_1_kernel_v1(int *cap, int *flow, int *inverseFlow, int *di
         // the following is to do with this u:
 
         // flush open_v
-        for(int v = vidx_start, int vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
+        for(int v = vidx_start, vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
             open_v[v] = false;
         }
 
