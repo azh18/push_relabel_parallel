@@ -139,7 +139,7 @@ then copy local minimum stash_dist to cpu memory
 output: updated flow matrix, updated stash_dist vector
 
 */
-__global__ void stage_2_kernel(int *cap, int *flow, int64_t excess, int* inverseFlow, int *dist, int* stash_dist, int* active_nodes, int n_active_nodes, int blocks_per_grid, int threads_per_block, int N){
+__global__ void stage_2_kernel(int *cap, int *flow, int64_t* excess, int* inverseFlow, int *dist, int* stash_dist, int* active_nodes, int n_active_nodes, int blocks_per_grid, int threads_per_block, int N){
     int bid = blockIdx.x;
     int tid = threadIdx.x;
     int uidx_start = bid;
@@ -246,13 +246,13 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         // Stage 2: relabel (update dist to stash_dist).
         memcpy(stash_dist, dist, N * sizeof(int));
         // stage 2 kernel
-        GPUErrChk(cudaMemcpy(dist_gpu, dist, N*sizeof(int64_t), cudaMemcpyHostToDevice));
-        GPUErrChk(cudaMemcpy(stash_dist_gpu, stash_dist, N*sizeof(int64_t), cudaMemcpyHostToDevice));
+        GPUErrChk(cudaMemcpy(dist_gpu, dist, N*sizeof(int), cudaMemcpyHostToDevice));
+        GPUErrChk(cudaMemcpy(stash_dist_gpu, stash_dist, N*sizeof(int), cudaMemcpyHostToDevice));
         stage_2_kernel<<<blocks_per_grid, threads_per_block>>>(cap_gpu, flow_gpu, excess_gpu, inverseFlow_gpu, dist_gpu, stash_dist_gpu, active_nodes_gpu, n_active_nodes, blocks_per_grid, threads_per_block, N);
         cudaDeviceSynchronize();
         // collect result.
-        GPUErrChk(cudaMemcpy(excess, excess_gpu, N*sizeof(int), cudaMemcpyDeviceToHost));
-        GPUErrChk(cudaMemcpy(stash_excess, stash_excess_gpu, N*sizeof(int), cudaMemcpyDeviceToHost));
+        GPUErrChk(cudaMemcpy(excess, excess_gpu, N*sizeof(int64_t), cudaMemcpyDeviceToHost));
+        GPUErrChk(cudaMemcpy(stash_excess, stash_excess_gpu, N*sizeof(int64_t), cudaMemcpyDeviceToHost));
         GPUErrChk(cudaMemcpy(flow, flow_gpu, N*N*sizeof(int), cudaMemcpyDeviceToHost));
         GPUErrChk(cudaMemcpy(inverseFlow, inverseFlow_gpu, N*N*sizeof(int), cudaMemcpyDeviceToHost));
         // Stage 3: update dist.
