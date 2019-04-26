@@ -13,6 +13,21 @@
 
 #include "cuda_push_relabel.h"
 
+#define DEBUG
+
+#ifdef DEBUG
+#define print_array(x, l) cout << ""; \
+    cout << #x << ":{"; \
+    for(int i=0;i<l;i++){ \
+        cout << x[i] << ", "; \
+    } \
+    cout << "}" << endl;
+#define pause sleep(1);
+#else
+#define print_array(x, l) 1;
+#define pause sleep(0);
+#endif
+
 #define MAX_N 520
 
 using namespace std;
@@ -257,6 +272,10 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         GPUErrChk(cudaMemcpy(inverseFlow, inverseFlow_gpu, N*N*sizeof(int), cudaMemcpyDeviceToHost));
         // Stage 3: update dist.
         swap(dist, stash_dist);
+        print_array(dist, N);
+        print_array(flow, N);
+        print_array(stash_excess, N);
+        print_array(excess, N);
 
         // Stage 4: apply excess-flow changes for destination vertices.
         for (auto v = 0; v < N; v++) {
