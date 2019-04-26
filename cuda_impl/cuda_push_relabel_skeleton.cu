@@ -35,12 +35,12 @@ __device__ inline int min_dev(int64_t a64, int b32){
     return a32<b32? a32 : b32 ;
 }
 
-__device__ inline atomicAdd(int64_t *addr, int64_t val){
+__device__ inline void atomicAdd(int64_t *addr, int64_t val){
     unsigned long long int assumed;
     unsigned long long int old = (unsigned long long int)(*addr);
     do{
         assumed = old;
-        old = atomicCAS(addr, assumed, (int64_t)((unsigned long long int)(*addr) + (unsigned long long int)val));
+        old = atomicCAS((unsigned long long int*)(addr), assumed, ((unsigned long long int)(*addr) + (unsigned long long int)val));
     } while(assumed != old);
 }
 
@@ -86,7 +86,7 @@ __global__ void stage_1_kernel_v1(int *cap, int *flow, int *inverseFlow, int *di
         local_dist[v] = dist[v];
     }
 
-    for(int uidx = uidx_start, int ucnt = 0; ucnt < uidx_cnt; ucnt++, uidx += blocks_per_grid){
+    for(int uidx = uidx_start, ucnt = 0; ucnt < uidx_cnt; ucnt++, uidx += blocks_per_grid){
         int u = active_nodes[uidx];
         // the following is to do with this u:
 
@@ -108,10 +108,10 @@ __global__ void stage_1_kernel_v1(int *cap, int *flow, int *inverseFlow, int *di
                 }
             }
         }
-        __synthreads();
+        __syncthreads();
 
         // use all threads to update flow/inverseFlow
-        for(int v = vidx_start, int vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
+        for(int v = vidx_start, vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
             if (open_v[v]){
                 int this_stash_send = stash_send[v];
                 flow[utils::dev_idx(u, v, N)] += this_stash_send;
@@ -122,7 +122,7 @@ __global__ void stage_1_kernel_v1(int *cap, int *flow, int *inverseFlow, int *di
         }
 
         // write back data in local mem to global mem
-        __synthreads();
+        __syncthreads();
         excess[u] = own_excess;
     }
 }
@@ -139,7 +139,7 @@ then copy local minimum stash_dist to cpu memory
 output: updated flow matrix, updated stash_dist vector
 
 */
-__global__ void stage_2_kernel(int *cap, int *flow, int* inverseFlow, int *dist, int* stash_dist, int* active_nodes, int n_active_nodes, int blocks_per_grid, int threads_per_block, int N){
+__global__ void stage_2_kernel(int *cap, int *flow, int64_t excess, int* inverseFlow, int *dist, int* stash_dist, int* active_nodes, int n_active_nodes, int blocks_per_grid, int threads_per_block, int N){
     int bid = blockIdx.x;
     int tid = threadIdx.x;
     int uidx_start = bid;
@@ -154,19 +154,22 @@ __global__ void stage_2_kernel(int *cap, int *flow, int* inverseFlow, int *dist,
         vidx_cnt += 1;
     }
     // update flow by inverseFlow
-    for(int uidx = uidx_start, int ucnt = 0; ucnt < uidx_cnt; ucnt++, uidx += blocks_per_grid){
+    for(int uidx = uidx_start, ucnt = 0; ucnt < uidx_cnt; ucnt++, uidx += blocks_per_grid){
         int u = active_nodes[uidx];
-        for(int v = vidx_start, int vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
+        for(int v = vidx_start, vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
             flow[utils::dev_idx(u, v, N)] += inverseFlow[utils::dev_idx(u, v, N)];
         }
     }
-    __synthreads();
+    __syncthreads();
     // get min_dist for each u
-    for(int uidx = uidx_start, int ucnt = 0; ucnt < uidx_cnt; ucnt++, uidx += blocks_per_grid){
+    for(int uidx = uidx_start, ucnt = 0; ucnt < uidx_cnt; ucnt++, uidx += blocks_per_grid){
         int u = active_nodes[uidx];
+        __shared__ int min_dist;
+        if(tid == 0){
+            min_dist = INT32_MAX;
+        }
         if(excess[u] > 0){
-            __shared__ int min_dist = INT32_MAX;
-            for(int v = vidx_start, int vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
+            for(int v = vidx_start, vcnt = 0; vcnt < vidx_cnt; vcnt++, v += threads_per_block){
                 int residual_cap = cap[utils::dev_idx(u, v, N)] - flow[utils::dev_idx(u, v, N)];
                 if (residual_cap > 0) {
                     // min_dist = min(min_dist, dist[v]);
@@ -177,7 +180,7 @@ __global__ void stage_2_kernel(int *cap, int *flow, int* inverseFlow, int *dist,
                 stash_dist[u] = min_dist + 1;
             }
         }
-        __synthreads();
+        __syncthreads();
     }
 }
 
@@ -245,7 +248,7 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         // stage 2 kernel
         GPUErrChk(cudaMemcpy(dist_gpu, dist, N*sizeof(int64_t), cudaMemcpyHostToDevice));
         GPUErrChk(cudaMemcpy(stash_dist_gpu, stash_dist, N*sizeof(int64_t), cudaMemcpyHostToDevice));
-        stage_2_kernel<<<blocks_per_grid, threads_per_block>>>(cap_gpu, flow_gpu, inverseFlow_gpu, dist_gpu, stash_dist_gpu, active_nodes_gpu, n_active_nodes, blocks_per_grid, threads_per_block, N);
+        stage_2_kernel<<<blocks_per_grid, threads_per_block>>>(cap_gpu, flow_gpu, excess_gpu, inverseFlow_gpu, dist_gpu, stash_dist_gpu, active_nodes_gpu, n_active_nodes, blocks_per_grid, threads_per_block, N);
         cudaDeviceSynchronize();
         // collect result.
         GPUErrChk(cudaMemcpy(excess, excess_gpu, N*sizeof(int), cudaMemcpyDeviceToHost));
