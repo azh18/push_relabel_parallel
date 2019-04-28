@@ -238,7 +238,11 @@ __global__ void stage_2_kernel(int *cap, int *flow, int64_t* excess, int* invers
             //    stash_dist[u] = min_dist + 1;
             //}
         }
-		__syncthreads();
+        __syncthreads();
+        if(tid == 0){
+            dist[u] = stash_dist[u];
+        }
+        __syncthreads();
 		//if (excess[u] > 0 && tid == 0) {
 		//	stash_dist[u] = min_dist + 1;
 		//}
@@ -289,14 +293,15 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
     while(!active_nodes.empty()){
         if(cnt++ % 100 == 0)
         printf("loop: %d\n", cnt);
-        auto start_clock = high_resolution_clock::now();
         int n_active_nodes = active_nodes.size();
         GPUErrChk(cudaMemcpyToSymbol(active_nodes_gpu, active_nodes.data(), n_active_nodes*sizeof(int)));
         GPUErrChk(cudaMemset(stash_excess_gpu, 0, N*sizeof(int64_t)));
+        auto start_clock = high_resolution_clock::now();
 
         // stage 1 kernel, output: updated excess vector, stash_excess vector, updated flow/inverseFlow matrix
         GPUErrChk(cudaMemcpy(excess_gpu, excess, N*sizeof(int64_t), cudaMemcpyHostToDevice));
-        GPUErrChk(cudaMemcpy(dist_gpu, dist, N*sizeof(int), cudaMemcpyHostToDevice));
+        // GPUErrChk(cudaMemcpy(dist_gpu, dist, N*sizeof(int), cudaMemcpyHostToDevice));
+        
         stage_1_kernel_v1<<<blocks_per_grid, threads_per_block>>>(cap_gpu, flow_gpu, inverseFlow_gpu, dist_gpu, excess_gpu, stash_excess_gpu, n_active_nodes, blocks_per_grid, threads_per_block, N);
         cudaDeviceSynchronize();    
         auto end_clock = high_resolution_clock::now();
@@ -322,19 +327,19 @@ int push_relabel(int blocks_per_grid, int threads_per_block, int N, int src, int
         // memcpy(stash_dist, dist, N * sizeof(int));
         // stage 2 kernel
         // GPUErrChk(cudaMemcpy(dist_gpu, dist, N*sizeof(int), cudaMemcpyHostToDevice));
-        GPUErrChk(cudaMemcpy(stash_dist_gpu, dist, N*sizeof(int), cudaMemcpyHostToDevice));
+        // GPUErrChk(cudaMemcpy(stash_dist_gpu, dist, N*sizeof(int), cudaMemcpyHostToDevice));
         stage_2_kernel<<<blocks_per_grid, threads_per_block>>>(cap_gpu, flow_gpu, excess_gpu, inverseFlow_gpu, dist_gpu, stash_dist_gpu, n_active_nodes, blocks_per_grid, threads_per_block, N);
         cudaDeviceSynchronize();   
         // cudaDeviceSynchronize();
         // collect result. (use 0.8s)
         GPUErrChk(cudaMemcpy(excess, excess_gpu, N*sizeof(int64_t), cudaMemcpyDeviceToHost));
         GPUErrChk(cudaMemcpy(stash_excess, stash_excess_gpu, N*sizeof(int64_t), cudaMemcpyDeviceToHost));
-		GPUErrChk(cudaMemcpy(stash_dist, stash_dist_gpu, N * sizeof(int), cudaMemcpyDeviceToHost));
+		// GPUErrChk(cudaMemcpy(stash_dist, stash_dist_gpu, N * sizeof(int), cudaMemcpyDeviceToHost));
         end_clock = high_resolution_clock::now();        
         tc[2] += (long long int)(duration_cast<microseconds>(end_clock - start_clock).count());
         
         // Stage 3: update dist.
-        swap(dist, stash_dist);
+        // swap(dist, stash_dist);
 
         // printf("after stage 2:\n");
         // printf("data:--------------------------------------\n");
