@@ -32,7 +32,7 @@ using namespace std::chrono;
 #define pause sleep(0);
 #endif
 
-#define MAX_N 520 // alter this if you use larger N!!!
+#define MAX_N 1024 // alter this if you use larger N!!!
 
 using namespace std;
 
